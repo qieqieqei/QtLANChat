@@ -1,5 +1,5 @@
 #include "MainWindow.h"
-#include "network/TcpClient.h"
+#include "core/ClientService.h"
 #include "protocol/ProtocolCodec.h"
 
 #include <QWidget>
@@ -21,12 +21,12 @@ MainWindow::MainWindow(QWidget* parent)
 {
     buildUi();
 
-    // Day2：先造出网络层，再接线（connectSignals() 里要引用 m_client）
-    m_client = new TcpClient(this);
+    // Day4：先造出门面（构造内就起线程、moveToThread），再接线
+    m_client = new ClientService(this);
 
     connectSignals();
     setConnectedUiState(false);          // 初始：未连接
-    appendLog("INFO", "QtLANChat Day3 启动（自定义协议）");
+    appendLog("INFO", "QtLANChat Day4 启动（网络在工作线程）");
 }
 
 MainWindow::~MainWindow() = default;
@@ -35,7 +35,7 @@ MainWindow::~MainWindow() = default;
 
 void MainWindow::buildUi()
 {
-    setWindowTitle("QtLANChat - Day3");
+    setWindowTitle("QtLANChat - Day4");
 
     QWidget* central = new QWidget(this);
     setCentralWidget(central);
@@ -116,14 +116,14 @@ void MainWindow::connectSignals()
     connect(m_hostEdit, &QLineEdit::textChanged, this, &MainWindow::updateConnectEnabled);
     connect(m_userEdit, &QLineEdit::textChanged, this, &MainWindow::updateConnectEnabled);
 
-    // ---- Day2：UI 只发信号，真正干活的是 TcpClient ----
-    connect(this,     &MainWindow::connectRequested,    m_client, &TcpClient::connectToServer);
-    connect(this,     &MainWindow::disconnectRequested, m_client, &TcpClient::disconnectFromServer);
+    // ---- Day4：UI 只发信号，真正干活的是网络线程里的 NetworkWorker ----
+    connect(this,     &MainWindow::connectRequested,    m_client, &ClientService::connectToServer);
+    connect(this,     &MainWindow::disconnectRequested, m_client, &ClientService::disconnectFromServer);
 
-    // 入方向：状态 / 数据 / 错误，全部由网络层驱动 UI
-    connect(m_client, &TcpClient::stateChanged,  this, &MainWindow::onConnectionStateChanged);
-    connect(m_client, &TcpClient::packetReceived, this, &MainWindow::onPacketReceived);
-    connect(m_client, &TcpClient::errorOccurred, this, [this](const QString& msg) {
+    // 入方向：状态 / 数据 / 错误，全部由网络层驱动 UI（跨线程 Queued，槽仍在 UI 线程执行）
+    connect(m_client, &ClientService::stateChanged,  this, &MainWindow::onConnectionStateChanged);
+    connect(m_client, &ClientService::packetReceived, this, &MainWindow::onPacketReceived);
+    connect(m_client, &ClientService::errorOccurred, this, [this](const QString& msg) {
         appendLog(QStringLiteral("ERROR"), msg);
     });
 }
@@ -142,14 +142,14 @@ void MainWindow::onConnectClicked()
     }
 
     appendLog("INFO", QString("连接请求 %1:%2 用户=%3").arg(host).arg(port).arg(user));
-    emit connectRequested(host, port, user);   // 真正的连接由 TcpClient 发起
+    emit connectRequested(host, port, user);   // 真正的连接由 ClientService 投递到网络线程
 }
 
 void MainWindow::onDisconnectClicked()
 {
     appendLog("INFO", "请求断开");
     emit disconnectRequested();
-    // 不断在这里改 UI 状态：等 TcpClient 的 stateChanged(0) 回来再改（单一数据源）
+    // 不断在这里改 UI 状态：等 stateChanged(0) 回来再改（单一数据源）
 }
 
 void MainWindow::updateConnectEnabled()
@@ -172,7 +172,7 @@ void MainWindow::setConnectedUiState(bool connected)
 
 // ---------------------------------------------------------------- 入方向槽
 
-void MainWindow::onConnectionStateChanged(int state)     // 将来由 ClientService 调用
+void MainWindow::onConnectionStateChanged(int state)     // 由 ClientService 转发过来
 {
     switch (state) {
     case 0:

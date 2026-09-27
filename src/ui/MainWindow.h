@@ -12,7 +12,7 @@ class QPlainTextEdit;
 class QListWidget;
 class QLabel;
 
-class TcpClient;                 // Day2：网络层，UI 只连它的信号（不直接碰 QTcpSocket）
+class ClientService;            // Day4：网络线程的门面，UI 只连它的信号（不直接碰 QTcpSocket/线程）
 
 class MainWindow : public QMainWindow
 {
@@ -58,6 +58,7 @@ private:
     QPlainTextEdit* m_logView       = nullptr;   // 日志区（只读）
     QLabel*         m_statusLabel   = nullptr;   // 状态提示（可选但对调试很有用）
 
-    // Day2：真实的 TCP 客户端。所有权交给 Qt（parent=this），不要手动 delete
-    TcpClient*      m_client        = nullptr;
+    // Day4：网络对象整体搬进工作线程后，UI 唯一需要认识的就是这个门面
+    // （真实 socket / 线程都在它内部；所有权交给 Qt，parent=this）
+    ClientService*  m_client        = nullptr;
 };

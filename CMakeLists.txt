@@ -30,12 +30,28 @@ set(PROTOCOL_SOURCES
     src/protocol/ProtocolCodec.cpp
 )
 
+# Day4 线程层：ClientService（线程所有者 + UI 门面，留在 UI 线程）+ NetworkWorker（干活，住网络线程）
+set(NETWORK_HEADERS
+    src/network/NetworkWorker.h
+)
+set(NETWORK_SOURCES
+    src/network/NetworkWorker.cpp
+)
+set(CORE_HEADERS
+    src/core/ClientService.h
+)
+set(CORE_SOURCES
+    src/core/ClientService.cpp
+)
+
 add_executable(QtLANChat
     src/main.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
-    src/network/TcpClient.h          # Day2 新增
-    src/network/TcpClient.cpp        # Day2 新增
+    ${NETWORK_HEADERS}               # Day4：NetworkWorker
+    ${NETWORK_SOURCES}               # Day4：NetworkWorker
+    ${CORE_HEADERS}                  # Day4：ClientService
+    ${CORE_SOURCES}                  # Day4：ClientService
     ${PROTOCOL_HEADERS}              # Day3 新增
     ${PROTOCOL_SOURCES}              # Day3 新增
 )
@@ -48,6 +64,7 @@ target_link_libraries(QtLANChat PRIVATE
 )
 
 # 只作用于本 target，不要用 add_compile_options 全局污染
+# （Qt6 的 QThread 在 Qt6::Core 里，不需要额外 find_package）
 if (MSVC)
     target_compile_options(QtLANChat PRIVATE /W4 /permissive- /utf-8)
 else()
