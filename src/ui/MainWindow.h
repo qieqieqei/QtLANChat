@@ -3,6 +3,8 @@
 #include <QMainWindow>
 #include <QStringList>   // 信号参数用到 QStringList，必须完整可见
 
+#include "protocol/Packet.h"   // Day3：packetReceived 槽的参数要完整类型
+
 class QLineEdit;
 class QSpinBox;
 class QPushButton;
@@ -28,6 +30,7 @@ signals:
 public slots:
     // 入方向：将来由 ClientService 驱动 UI。Day1 用 int 占位，避免依赖还没写的枚举
     void onConnectionStateChanged(int state);   // TODO(Day5): 换成 ConnectionState + qRegisterMetaType
+    void onPacketReceived(const proto::Packet& packet);   // Day3：收包入口（Day5 交给上层分发）
     void onChatMessageReceived(const QString& from, const QString& text, const QString& time);
     void onUserListChanged(const QStringList& users);
     void onLogMessage(const QString& level, const QString& text);

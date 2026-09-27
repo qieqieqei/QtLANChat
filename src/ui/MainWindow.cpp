@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "network/TcpClient.h"
+#include "protocol/ProtocolCodec.h"
 
 #include <QWidget>
 #include <QLabel>
@@ -13,6 +14,7 @@
 #include <QHBoxLayout>
 #include <QDateTime>
 #include <QTime>
+#include <QJsonObject>
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -24,7 +26,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     connectSignals();
     setConnectedUiState(false);          // 初始：未连接
-    appendLog("INFO", "QtLANChat Day2 启动（真实 TCP）");
+    appendLog("INFO", "QtLANChat Day3 启动（自定义协议）");
 }
 
 MainWindow::~MainWindow() = default;
@@ -33,7 +35,7 @@ MainWindow::~MainWindow() = default;
 
 void MainWindow::buildUi()
 {
-    setWindowTitle("QtLANChat - Day2");
+    setWindowTitle("QtLANChat - Day3");
 
     QWidget* central = new QWidget(this);
     setCentralWidget(central);
@@ -120,9 +122,7 @@ void MainWindow::connectSignals()
 
     // 入方向：状态 / 数据 / 错误，全部由网络层驱动 UI
     connect(m_client, &TcpClient::stateChanged,  this, &MainWindow::onConnectionStateChanged);
-    connect(m_client, &TcpClient::lineReceived,  this, [this](const QString& line) {
-        appendChat(QStringLiteral("server"), line, QTime::currentTime().toString("HH:mm:ss"));
-    });
+    connect(m_client, &TcpClient::packetReceived, this, &MainWindow::onPacketReceived);
     connect(m_client, &TcpClient::errorOccurred, this, [this](const QString& msg) {
         appendLog(QStringLiteral("ERROR"), msg);
     });
@@ -190,6 +190,33 @@ void MainWindow::onConnectionStateChanged(int state)     // 将来由 ClientServ
         appendLog("WARN", "未知状态");
         break;
     }
+}
+
+// Day3：协议层切好的完整包先到这里；Day5 会换成 ChatManager 分发
+void MainWindow::onPacketReceived(const proto::Packet& packet)
+{
+    const proto::MessageType type = packet.header.type;
+
+    // 聊天类消息的 payload 是紧凑 JSON：{"from":...,"text":...,"time":...}
+    if (type == proto::MessageType::ChatPrivate || type == proto::MessageType::ChatGroup) {
+        QJsonObject obj;
+        if (ProtocolCodec::decodeJson(packet, &obj)) {
+            appendChat(obj.value(QStringLiteral("from")).toString(QStringLiteral("server")),
+                       obj.value(QStringLiteral("text")).toString(),
+                       obj.value(QStringLiteral("time")).toString(
+                           QTime::currentTime().toString(QStringLiteral("HH:mm:ss"))));
+            return;
+        }
+        appendLog(QStringLiteral("WARN"), QStringLiteral("聊天包 JSON 解析失败"));
+        return;
+    }
+
+    // 其余类型：Day3 先只打日志，证明「字节流 -> 消息」打通了
+    appendLog(QStringLiteral("INFO"),
+              QStringLiteral("收到 packet type=0x%1 requestId=%2 payloadLen=%3")
+                  .arg(int(type), 2, 16, QLatin1Char('0'))
+                  .arg(packet.header.requestId)
+                  .arg(packet.payload.size()));
 }
 
 void MainWindow::onChatMessageReceived(const QString& from, const QString& text, const QString& time)

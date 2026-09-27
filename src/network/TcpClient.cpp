@@ -2,6 +2,8 @@
 
 #include <QTcpSocket>
 
+#include "protocol/ProtocolCodec.h"
+
 TcpClient::TcpClient(QObject* parent)
     : QObject(parent)
 {
@@ -46,16 +48,15 @@ void TcpClient::disconnectFromServer()
     handleDisconnected();                // 兜底：abort() 在部分路径上不走 onDisconnected()
 }
 
-void TcpClient::sendLine(const QString& line)
+void TcpClient::sendPacket(const proto::Packet& packet)
 {
     if (!isConnected()) {
         emit errorOccurred(QStringLiteral("未连接，发送被丢弃"));
         return;
     }
 
-    // toUtf8：中文按 UTF-8 出网（toLocal8Bit() 在 MSVC 下会写出 GBK，对端中文必乱码）
-    // 末尾 '\n' 只是 Day2 的临时分帧手段，Day3 会换成 16 字节头 + payload
-    m_socket->write(line.toUtf8() + '\n');
+    // 头 + payload 一次写出。粘不粘是接收端 ReceiveBuffer 的事。
+    m_socket->write(ProtocolCodec::encode(packet));
 }
 
 void TcpClient::onConnected()
@@ -72,13 +73,20 @@ void TcpClient::onDisconnected()
 
 void TcpClient::onReadyRead()
 {
-    m_rx += m_socket->readAll();         // 先全部收进缓冲，绝不当成「一条完整消息」
+    m_rx.append(m_socket->readAll());    // 先全部收进缓冲，绝不当成「一条完整消息」
 
-    int idx = -1;
-    while ((idx = m_rx.indexOf('\n')) >= 0) {
-        const QString line = QString::fromUtf8(m_rx.left(idx));
-        m_rx.remove(0, idx + 1);         // 残余留在 m_rx，等下一次 readyRead
-        emit lineReceived(line);
+    // 一次 readyRead 里可能是 0 个、1 个或 N 个完整包
+    for (;;) {
+        proto::Packet pkt;
+        QString err;
+        if (!m_rx.takeNextPacket(&pkt, &err)) {
+            if (!err.isEmpty()) {
+                emit errorOccurred(err);   // magic 错 / 长度超限
+                disconnectFromServer();    // 垃圾流：清缓冲 + 断开，别继续硬解
+            }
+            break;                         // 头不够 / 包不完整：一个字节都不动，等下一次
+        }
+        emit packetReceived(pkt);          // Day3 先由 UI 打日志验证，Day5 交给 ChatManager
     }
 }
 
@@ -107,7 +115,7 @@ void TcpClient::handleDisconnected()
 {
     const bool hadConnect = m_connectEmitted;
     m_connectEmitted = false;
-    m_rx.clear();                        // 断开后残留的半行必须丢掉，否则会接到下一条连接上
+    m_rx.clear();                        // 断开后残留的半包必须丢掉，否则会接到下一条连接上
     emitState(0);
 
     if (hadConnect)

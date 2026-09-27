@@ -16,12 +16,28 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 
+# Day3 协议层：header / packet / receive buffer / codec（不含 UI 依赖，方便 Day4 丢进工作线程）
+set(PROTOCOL_HEADERS
+    src/protocol/MessageType.h
+    src/protocol/PacketHeader.h
+    src/protocol/Packet.h
+    src/protocol/ReceiveBuffer.h
+    src/protocol/ProtocolCodec.h
+)
+set(PROTOCOL_SOURCES
+    src/protocol/PacketHeader.cpp
+    src/protocol/ReceiveBuffer.cpp
+    src/protocol/ProtocolCodec.cpp
+)
+
 add_executable(QtLANChat
     src/main.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
     src/network/TcpClient.h          # Day2 新增
     src/network/TcpClient.cpp        # Day2 新增
+    ${PROTOCOL_HEADERS}              # Day3 新增
+    ${PROTOCOL_SOURCES}              # Day3 新增
 )
 
 target_include_directories(QtLANChat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -50,9 +66,16 @@ if(QTLANCHAT_BUILD_TOOLS)
     add_executable(echo_server tools/echo_server/main.cpp)
     target_link_libraries(echo_server PRIVATE Qt6::Network)
 
+    # Day3 一次性自测：粘包/拆包 8 个测试向量（不是交付物）
+    add_executable(protocol_selftest tools/protocol_selftest.cpp ${PROTOCOL_HEADERS} ${PROTOCOL_SOURCES})
+    target_include_directories(protocol_selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(protocol_selftest PRIVATE Qt6::Core)
+
     if(MSVC)
         target_compile_options(echo_server PRIVATE /W4 /permissive- /utf-8)
+        target_compile_options(protocol_selftest PRIVATE /W4 /permissive- /utf-8)
     else()
         target_compile_options(echo_server PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(protocol_selftest PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endif()
