@@ -10,6 +10,8 @@ class QPlainTextEdit;
 class QListWidget;
 class QLabel;
 
+class TcpClient;                 // Day2：网络层，UI 只连它的信号（不直接碰 QTcpSocket）
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT                     // 有它才会跑 moc，缺了信号槽就废
@@ -52,4 +54,7 @@ private:
     QListWidget*    m_userList      = nullptr;   // 用户列表
     QPlainTextEdit* m_logView       = nullptr;   // 日志区（只读）
     QLabel*         m_statusLabel   = nullptr;   // 状态提示（可选但对调试很有用）
+
+    // Day2：真实的 TCP 客户端。所有权交给 Qt（parent=this），不要手动 delete
+    TcpClient*      m_client        = nullptr;
 };

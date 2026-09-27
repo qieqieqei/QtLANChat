@@ -20,6 +20,8 @@ add_executable(QtLANChat
     src/main.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
+    src/network/TcpClient.h          # Day2 新增
+    src/network/TcpClient.cpp        # Day2 新增
 )
 
 target_include_directories(QtLANChat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -37,3 +39,20 @@ else()
 endif()
 
 set_target_properties(QtLANChat PROPERTIES WIN32_EXECUTABLE ON)  # Windows 不弹黑框
+
+# ---------------------------------------------------------------------------
+# Day2 工具：迷你 echo 服务器，只用来验证客户端「连没连上、数据通不通」
+# 它不是交付物，Day7 打包时不要带上（-DQTLANCHAT_BUILD_TOOLS=OFF 可整体关掉）
+# ---------------------------------------------------------------------------
+option(QTLANCHAT_BUILD_TOOLS "Build helper tools (echo_server) for local verification" ON)
+
+if(QTLANCHAT_BUILD_TOOLS)
+    add_executable(echo_server tools/echo_server/main.cpp)
+    target_link_libraries(echo_server PRIVATE Qt6::Network)
+
+    if(MSVC)
+        target_compile_options(echo_server PRIVATE /W4 /permissive- /utf-8)
+    else()
+        target_compile_options(echo_server PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endif()

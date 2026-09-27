@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "network/TcpClient.h"
 
 #include <QWidget>
 #include <QLabel>
@@ -11,23 +12,19 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QDateTime>
+#include <QTime>
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
     buildUi();
+
+    // Day2：先造出网络层，再接线（connectSignals() 里要引用 m_client）
+    m_client = new TcpClient(this);
+
     connectSignals();
     setConnectedUiState(false);          // 初始：未连接
-    appendLog("INFO", "QtLANChat Day1 启动");
-
-    // ---- Day1 临时自连：仅用于在无网络的情况下验收 UI 链路 ----
-    // 点击 Connect -> 收到自己的信号 -> 假装连接成功 -> 观察日志/状态变化。
-    // TODO(Day2): 接入 ClientService 后【必须删除】这段自连。
-    connect(this, &MainWindow::connectRequested, this,
-            [this](const QString&, quint16, const QString&) {
-                appendLog("DEBUG", "信号已收到");
-                onConnectionStateChanged(2);       // 假装连上了
-            });
+    appendLog("INFO", "QtLANChat Day2 启动（真实 TCP）");
 }
 
 MainWindow::~MainWindow() = default;
@@ -36,7 +33,7 @@ MainWindow::~MainWindow() = default;
 
 void MainWindow::buildUi()
 {
-    setWindowTitle("QtLANChat - Day1");
+    setWindowTitle("QtLANChat - Day2");
 
     QWidget* central = new QWidget(this);
     setCentralWidget(central);
@@ -116,6 +113,19 @@ void MainWindow::connectSignals()
     // 输入变化 -> 刷新按钮可用性
     connect(m_hostEdit, &QLineEdit::textChanged, this, &MainWindow::updateConnectEnabled);
     connect(m_userEdit, &QLineEdit::textChanged, this, &MainWindow::updateConnectEnabled);
+
+    // ---- Day2：UI 只发信号，真正干活的是 TcpClient ----
+    connect(this,     &MainWindow::connectRequested,    m_client, &TcpClient::connectToServer);
+    connect(this,     &MainWindow::disconnectRequested, m_client, &TcpClient::disconnectFromServer);
+
+    // 入方向：状态 / 数据 / 错误，全部由网络层驱动 UI
+    connect(m_client, &TcpClient::stateChanged,  this, &MainWindow::onConnectionStateChanged);
+    connect(m_client, &TcpClient::lineReceived,  this, [this](const QString& line) {
+        appendChat(QStringLiteral("server"), line, QTime::currentTime().toString("HH:mm:ss"));
+    });
+    connect(m_client, &TcpClient::errorOccurred, this, [this](const QString& msg) {
+        appendLog(QStringLiteral("ERROR"), msg);
+    });
 }
 
 // ---------------------------------------------------------------- 交互逻辑
@@ -132,15 +142,14 @@ void MainWindow::onConnectClicked()
     }
 
     appendLog("INFO", QString("连接请求 %1:%2 用户=%3").arg(host).arg(port).arg(user));
-    emit connectRequested(host, port, user);
-    // Day1 没有真正的接收者；为验证链路，构造函数里有一段临时自连（见文件顶部注释）。
+    emit connectRequested(host, port, user);   // 真正的连接由 TcpClient 发起
 }
 
 void MainWindow::onDisconnectClicked()
 {
     appendLog("INFO", "请求断开");
     emit disconnectRequested();
-    setConnectedUiState(false);
+    // 不断在这里改 UI 状态：等 TcpClient 的 stateChanged(0) 回来再改（单一数据源）
 }
 
 void MainWindow::updateConnectEnabled()
