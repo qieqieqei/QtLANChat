@@ -2,17 +2,24 @@
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
 
-#include "protocol/Packet.h"     // 信号/槽参数需要完整类型
+#include "network/ConnectionState.h"   // 状态信号的参数类型
+#include "protocol/Packet.h"           // 信号/槽参数需要完整类型
 
 class QThread;
 class NetworkWorker;
+class ConnectionManager;
+class ChatManager;
 
-// Day4 门面（facade）：UI 唯一能看到的网络对象。
+// Day4/Day5 门面（facade）：UI 唯一能看到的网络对象。
 //
-// 对外暴露的信号与 Day2 的 TcpClient 完全一致 —— 线程怎么开、socket 在哪个线程，
-// UI 层完全不需要知道。它只负责：持有 QThread、把工作排队投递到网络线程、
-// 把 worker 的信号原样转发回 UI 线程。
+// 内部三件套全部活在同一张「网络线程」里：
+//   - NetworkWorker     ：QTcpSocket + 收包拆帧（Day4）
+//   - ConnectionManager ：心跳保活 + 断线自动重连（Day5）
+//   - ChatManager       ：登录 / 私聊 / 群聊 / 用户列表的「消息语义」（Day5）
+//
+// UI 只认识本类：发请求用槽，收结果用信号。线程怎么开、谁在哪个线程，UI 完全不需要知道。
 class ClientService : public QObject
 {
     Q_OBJECT
@@ -22,20 +29,28 @@ public:
     ~ClientService() override;
 
 public slots:
-    void connectToServer(const QString& host, quint16 port);
+    // 出方向：连接 / 断开 / 发消息（都在 UI 线程被调用，内部排队投递到网络线程）
+    void connectToServer(const QString& host, quint16 port, const QString& userName);
     void disconnectFromServer();
-    void sendPacket(const proto::Packet& packet);
+    void sendPrivate(const QString& to, const QString& text);
+    void sendGroup(const QString& text);
 
 signals:
-    void connected();
-    void disconnected();
+    // 入方向：全部由网络线程驱动，跨线程队列投递回 UI 线程
+    void stateChanged(ConnectionState state);            // 单一数据源：UI 状态只认这一处
     void errorOccurred(const QString& message);
-    void packetReceived(const proto::Packet& packet);
-    void stateChanged(int state);
+    void reconnectAttempt(int attempt, int delayMs);     // 给日志用
+    void userListChanged(const QStringList& users);
+    void privateMessageReceived(const QString& from, const QString& text, qint64 ts);
+    void groupMessageReceived(const QString& from, const QString& text, qint64 ts);
+    void loginSucceeded(const QString& selfName);
+    void loginFailed(const QString& reason);
 
 private:
-    void stopWorker();                   // 收尾：通知 worker -> quit -> wait
+    void stopWorker();                   // 收尾：通知各对象 -> quit -> wait
 
-    QThread*       m_thread = nullptr;   // 线程对象本身留在 UI 线程
-    NetworkWorker* m_worker = nullptr;   // 注意：它属于网络线程，UI 不能直接调它的方法
+    QThread*           m_thread = nullptr;   // 线程对象本身留在 UI 线程
+    NetworkWorker*     m_worker = nullptr;   // 属于网络线程
+    ConnectionManager* m_conn   = nullptr;   // 属于网络线程
+    ChatManager*       m_chat   = nullptr;   // 属于网络线程
 };

@@ -107,6 +107,26 @@ build/bin/protocol_selftest.exe    # 同样需要把 Qt bin 加入 PATH
 （把 2000 条消息在一瞬间灌进聊天框会有 ~0.85 s 卡顿——那是 UI 逐条渲染的代价，
 不是网络线程拖住了界面，批处理/节流留待后续优化。）
 
+## Day5：聊天 + 心跳 + 断线重连
+
+网络线程里现在住着三个对象（都在 `ClientService` 构造时 `moveToThread`）：
+
+- `NetworkWorker` —— `QTcpSocket` + 收包拆帧（Day4）
+- `ConnectionManager` —— 心跳保活（5 s 一发，ACK 超时 15 s，1 s 轮询检查）+ 断线重连
+- `ChatManager` —— 只做消息语义（登录 / 私聊 / 群聊 / 用户列表），**不碰 socket**，
+  出方向只 `emit requestPacket(proto::Packet)`，入方向只 `onPacketReceived(...)`
+
+状态收敛到 `ConnectionState { Disconnected, Connecting, Connected, Reconnecting }`（枚举 +
+`Q_DECLARE_METATYPE` + `qRegisterMetaType`），UI 的状态只能来自 `ConnectionManager::stateChanged`
+这**一个**数据源。重连退避 1→2→4→8→16→32 s 封顶 30 s，连上即清零；**主动断开不触发重连**，
+靠 `NetworkWorker::transportLost`（仅非主动断开/连接失败才发）区分。重连成功后由
+`ChatManager::onServerConnected()` 用记住的名字自动重新 `LOGIN`；登录被拒则清空名字，
+避免重连后拿一个已被占用的名字抢登。
+
+> 本地验证：`protocol_selftest` 16 项回归全过；`day5_probe`（自己拉起 `chat_server`，两个真实客户端）
+> 覆盖登录 / 用户列表 / 私聊 / 群聊 / 重名拒绝 / 特殊字符往返 / 心跳保活 / 杀服务器重连 / 重连重登 /
+> 优雅退出，**17 项全部 PASS**。
+
 ## 目录结构
 
 ```
@@ -114,12 +134,15 @@ QtLANChat/
 ├── CMakeLists.txt
 ├── src/
 │   ├── main.cpp
-│   ├── ui/            # MainWindow：界面与信号槽接线
-│   ├── core/          # ClientService：QThread 持有者 + UI 门面
-│   ├── network/       # NetworkWorker：工作线程里的 QTcpSocket + 分包接入
+│   ├── ui/            # MainWindow：界面与信号槽接线（Day5 加入输入框 + 发送）
+│   ├── core/          # ClientService（线程门面）+ ConnectionManager（心跳/重连）+ ChatManager（消息语义）
+│   ├── network/       # NetworkWorker：工作线程里的 QTcpSocket + 分包接入；ConnectionState 枚举
 │   └── protocol/      # 帧格式、序列化、ReceiveBuffer（粘包/拆包）
 └── tools/
-    ├── echo_server/        # 本地联调用的回显服务器
+    ├── echo_server/        # 本地联调用的回显服务器（Day2）
+    ├── chat_server/        # Day5 联调服务器：登录/用户列表/私聊/群聊/心跳
+    ├── day5_probe/         # Day5 验收探针（自动拉起 chat_server 跑 A~E）
+    ├── gui_probe/          # Day5 GUI 取证（窗口截图）
     └── protocol_selftest.cpp  # 协议层离线自测（不依赖网络）
 ```
 
@@ -129,7 +152,7 @@ QtLANChat/
 - [x] **Day2** — 真实 TCP 连接（连 / 断）
 - [x] **Day3** — 自定义分帧协议（16 字节定长头 + payload），替代临时 `'\n'` 分帧
 - [x] **Day4** — 多线程网络层：网络对象搬进工作线程（`moveToThread` + 跨线程信号槽）
-- [ ] **Day5** — 连接状态枚举 + 自动重连（指数退避）
+- [x] **Day5** — 聊天（登录/私聊/群聊/用户列表）+ 心跳保活 + 断线自动重连（状态机 + 指数退避）
 - [ ] **Day6** — 文件传输 / 更多 UI 细节
 - [ ] **Day7** — 打包发布
 

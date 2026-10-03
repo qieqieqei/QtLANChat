@@ -12,6 +12,8 @@ class ProtocolCodec
 {
 public:
     static QByteArray encode(const proto::Packet& pkt);
+    // 直接产出「可投递给 NetworkWorker::sendPacket 的 Packet」（ChatManager/ConnectionManager 用）
+    static proto::Packet makeJson(proto::MessageType type, const QJsonObject& obj, quint32 requestId = 0);
     static QByteArray encodeJson(proto::MessageType type, const QJsonObject& obj, quint32 requestId = 0);
     static bool       decodeJson(const proto::Packet& pkt, QJsonObject* out);
 

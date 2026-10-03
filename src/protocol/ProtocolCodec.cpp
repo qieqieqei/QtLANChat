@@ -19,6 +19,11 @@ QByteArray ProtocolCodec::encode(const proto::Packet& pkt)
 
 QByteArray ProtocolCodec::encodeJson(proto::MessageType type, const QJsonObject& obj, quint32 requestId)
 {
+    return encode(makeJson(type, obj, requestId));
+}
+
+proto::Packet ProtocolCodec::makeJson(proto::MessageType type, const QJsonObject& obj, quint32 requestId)
+{
     // Compact！不要 Indented —— 缩进会多出几十字节，进协议就是灾难
     const QByteArray payload = QJsonDocument(obj).toJson(QJsonDocument::Compact);
 
@@ -31,7 +36,7 @@ QByteArray ProtocolCodec::encodeJson(proto::MessageType type, const QJsonObject&
     pkt.header.payloadLen = quint32(payload.size());   // 只算 payload
     pkt.payload           = payload;
 
-    return encode(pkt);
+    return pkt;
 }
 
 bool ProtocolCodec::decodeJson(const proto::Packet& pkt, QJsonObject* out)

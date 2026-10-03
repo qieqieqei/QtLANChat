@@ -46,12 +46,14 @@ void NetworkWorker::stop()
     // 由 ClientService 用 BlockingQueuedConnection 调进来 => 一定在网络线程内执行。
     // 只做收尾（abort + 丢半包），对象本身交给 ClientService：
     //   thread finished -> deleteLater，或线程没起来时直接 delete。
+    m_voluntaryClose = true;                         // 收尾时断开不算「掉线」
     if (m_socket)
         m_socket->abort();                           // abort 立刻断，不排队等发送队列排空
 
     m_rx.clear();
-    m_lastState = 0;
+    m_lastState = ConnectionState::Disconnected;
     m_connectEmitted = false;
+    m_attempting = false;
 }
 
 // ---------------------------------------------------------------- 出方向
@@ -61,13 +63,17 @@ void NetworkWorker::connectToServer(const QString& host, quint16 port)
     if (!m_socket)
         return;                                      // start() 还没跑：忽略
 
-    // 连点 Connect 不能叠加多个连接尝试：先归零，再发起新的一次
+    // 连点 Connect 不能叠加多个连接尝试：先归零，再发起新的一次。
+    // 这次 abort 是我们自己发起的，不算掉线（不会触发 transportLost）。
     if (m_socket->state() != QAbstractSocket::UnconnectedState) {
+        m_voluntaryClose = true;
         m_socket->abort();
-        handleDisconnected();
+        handleDisconnected(QStringLiteral("重新发起连接"));
     }
 
-    emitState(1);                                    // 连接中
+    m_voluntaryClose = false;                        // 从现在起，任何断开都算「掉线」
+    m_attempting = true;                             // 连接中若失败，也要报 transportLost
+    emitState(ConnectionState::Connecting);
     m_socket->connectToHost(host, port);             // 异步：结果走 connected()/errorOccurred()
 }
 
@@ -76,19 +82,21 @@ void NetworkWorker::disconnectFromServer()
     if (!m_socket)
         return;
 
+    m_voluntaryClose = true;                         // 用户主动断开：不算掉线
+
     if (m_socket->state() == QAbstractSocket::UnconnectedState) {
-        handleDisconnected();                        // 本来就没连：只把状态归零
+        handleDisconnected(QStringLiteral("本来就未连接"));   // 本来就没连：只把状态归零
         return;
     }
 
     m_socket->abort();
-    handleDisconnected();                            // 兜底：abort() 在部分路径上不走 onDisconnected()
+    handleDisconnected(QStringLiteral("主动断开"));    // 兜底：abort() 在部分路径上不走 onDisconnected()
 }
 
 void NetworkWorker::sendPacket(const proto::Packet& packet)
 {
     if (!m_socket || m_socket->state() != QAbstractSocket::ConnectedState) {
-        emit errorOccurred(QStringLiteral("未连接，发送被丢弃"));
+        emit errorOccurred(QStringLiteral("未连接，发送被丢弃"));   // C4：不静默丢弃
         return;
     }
 
@@ -101,13 +109,15 @@ void NetworkWorker::sendPacket(const proto::Packet& packet)
 void NetworkWorker::onConnected()
 {
     m_connectEmitted = true;
-    emitState(2);
+    m_attempting = false;
+    emitState(ConnectionState::Connected);
     emit connected();
 }
 
 void NetworkWorker::onDisconnected()
 {
-    handleDisconnected();
+    // socket 自己断的（对端关闭 / TCP RST）=> 非主动 => 可能触发重连
+    handleDisconnected(QStringLiteral("连接已断开"));
 }
 
 void NetworkWorker::onReadyRead()
@@ -134,14 +144,15 @@ void NetworkWorker::onSocketError(int code)
     Q_UNUSED(code);                                  // 只需要文本；具体错误码留给上层判断时再说
     emit errorOccurred(m_socket->errorString());
 
-    // 连接被拒 / DNS 失败 / 连接中被 RST：socket 已回到 UnconnectedState，把状态归零
+    // 连接被拒 / DNS 失败 / 连接中被 RST：socket 已回到 UnconnectedState，把状态归零。
+    // 这也是「连接失败」触发 transportLost 的路径。
     if (m_socket->state() == QAbstractSocket::UnconnectedState)
-        handleDisconnected();
+        handleDisconnected(m_socket->errorString());
 }
 
 // ---------------------------------------------------------------- 内部
 
-void NetworkWorker::emitState(int state)
+void NetworkWorker::emitState(ConnectionState state)
 {
     if (state == m_lastState)
         return;                                      // 同一个状态不重复上报
@@ -150,13 +161,19 @@ void NetworkWorker::emitState(int state)
     emit stateChanged(state);
 }
 
-void NetworkWorker::handleDisconnected()
+void NetworkWorker::handleDisconnected(const QString& reason)
 {
     const bool hadConnect = m_connectEmitted;
+    const bool lost = hadConnect || m_attempting;    // 连上后断开，或连接失败 —— 都算「传输层掉了」
+
     m_connectEmitted = false;
+    m_attempting = false;
     m_rx.clear();                                    // 断开后残留的半包必须丢掉，否则会接到下一条连接上
-    emitState(0);
+    emitState(ConnectionState::Disconnected);
 
     if (hadConnect)
         emit disconnected();
+
+    if (lost && !m_voluntaryClose)
+        emit transportLost(reason);                  // 只有非主动的断线/连接失败才触发自动重连
 }

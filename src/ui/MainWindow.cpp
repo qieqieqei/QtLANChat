@@ -1,6 +1,5 @@
 #include "MainWindow.h"
 #include "core/ClientService.h"
-#include "protocol/ProtocolCodec.h"
 
 #include <QWidget>
 #include <QLabel>
@@ -13,8 +12,6 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QDateTime>
-#include <QTime>
-#include <QJsonObject>
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -25,8 +22,8 @@ MainWindow::MainWindow(QWidget* parent)
     m_client = new ClientService(this);
 
     connectSignals();
-    setConnectedUiState(false);          // 初始：未连接
-    appendLog("INFO", "QtLANChat Day4 启动（网络在工作线程）");
+    refreshUiState();                    // 初始：未连接，发送框禁用
+    appendLog("INFO", "QtLANChat Day5 启动（聊天 + 心跳 + 自动重连）");
 }
 
 MainWindow::~MainWindow() = default;
@@ -35,7 +32,7 @@ MainWindow::~MainWindow() = default;
 
 void MainWindow::buildUi()
 {
-    setWindowTitle("QtLANChat - Day4");
+    setWindowTitle("QtLANChat - Day5");
 
     QWidget* central = new QWidget(this);
     setCentralWidget(central);
@@ -55,6 +52,24 @@ void MainWindow::buildUi()
     m_logView = new QPlainTextEdit();
     m_logView->setReadOnly(true);
     m_userList = new QListWidget();
+
+    // Day5：消息输入框 + 发送按钮
+    m_msgEdit = new QLineEdit();
+    m_msgEdit->setPlaceholderText("输入消息，回车发送（双击右侧用户 = 私聊）");
+    m_sendBtn = new QPushButton("Send");
+
+    // objectName：方便 UI 自动化/测试脚本 findChild 定位（也便于排查）
+    m_hostEdit->setObjectName("hostEdit");
+    m_portSpin->setObjectName("portSpin");
+    m_userEdit->setObjectName("userEdit");
+    m_connectBtn->setObjectName("connectBtn");
+    m_disconnectBtn->setObjectName("disconnectBtn");
+    m_statusLabel->setObjectName("statusLabel");
+    m_chatView->setObjectName("chatView");
+    m_logView->setObjectName("logView");
+    m_userList->setObjectName("userList");
+    m_msgEdit->setObjectName("msgEdit");
+    m_sendBtn->setObjectName("sendBtn");
 
     // 顶部工具栏（全部用 Layout，禁止 setGeometry 硬定位）
     QHBoxLayout* topBar = new QHBoxLayout();
@@ -83,18 +98,26 @@ void MainWindow::buildUi()
     center->setStretchFactor(0, 3);
     center->setStretchFactor(1, 1);
 
+    // 底部：输入框（拉伸）+ 发送按钮
+    QHBoxLayout* bottomBar = new QHBoxLayout();
+    bottomBar->addWidget(m_msgEdit, 1);
+    bottomBar->addWidget(m_sendBtn);
+
     // 根布局
     QVBoxLayout* root = new QVBoxLayout(central);
     root->addLayout(topBar);
     root->addWidget(center, 1);
+    root->addLayout(bottomBar);          // 插在聊天区与日志区之间
     root->addWidget(new QLabel("日志"));
     root->addWidget(m_logView, 1);
 
-    // Tab 顺序：地址 -> 端口 -> 用户 -> Connect -> Disconnect
+    // Tab 顺序：地址 -> 端口 -> 用户 -> Connect -> Disconnect -> 消息 -> Send
     setTabOrder(m_hostEdit, m_portSpin);
     setTabOrder(m_portSpin, m_userEdit);
     setTabOrder(m_userEdit, m_connectBtn);
     setTabOrder(m_connectBtn, m_disconnectBtn);
+    setTabOrder(m_disconnectBtn, m_msgEdit);
+    setTabOrder(m_msgEdit, m_sendBtn);
 
     resize(960, 640);
     setMinimumSize(720, 480);
@@ -107,8 +130,11 @@ void MainWindow::connectSignals()
     // 用函数指针语法，编译期检查签名，拼错直接编译失败（字符串式语法只在运行时报 warn）
     connect(m_connectBtn, &QPushButton::clicked, this, &MainWindow::onConnectClicked);
     connect(m_disconnectBtn, &QPushButton::clicked, this, &MainWindow::onDisconnectClicked);
+    connect(m_sendBtn, &QPushButton::clicked, this, &MainWindow::onSendClicked);
+    connect(m_msgEdit, &QLineEdit::returnPressed, this, &MainWindow::onSendClicked);
+    connect(m_userList, &QListWidget::itemDoubleClicked, this, &MainWindow::onUserDoubleClicked);
 
-    // 回车快捷：任一输入框按回车 = 点 Connect
+    // 回车快捷：地址/用户输入框按回车 = 点 Connect
     connect(m_hostEdit, &QLineEdit::returnPressed, this, &MainWindow::onConnectClicked);
     connect(m_userEdit, &QLineEdit::returnPressed, this, &MainWindow::onConnectClicked);
 
@@ -116,13 +142,20 @@ void MainWindow::connectSignals()
     connect(m_hostEdit, &QLineEdit::textChanged, this, &MainWindow::updateConnectEnabled);
     connect(m_userEdit, &QLineEdit::textChanged, this, &MainWindow::updateConnectEnabled);
 
-    // ---- Day4：UI 只发信号，真正干活的是网络线程里的 NetworkWorker ----
-    connect(this,     &MainWindow::connectRequested,    m_client, &ClientService::connectToServer);
-    connect(this,     &MainWindow::disconnectRequested, m_client, &ClientService::disconnectFromServer);
+    // ---- Day4/Day5：UI 只发信号，真正干活的在网络线程 ----
+    connect(this, &MainWindow::connectRequested,    m_client, &ClientService::connectToServer);
+    connect(this, &MainWindow::disconnectRequested, m_client, &ClientService::disconnectFromServer);
+    connect(this, &MainWindow::sendPrivateRequested, m_client, &ClientService::sendPrivate);
+    connect(this, &MainWindow::sendGroupRequested,   m_client, &ClientService::sendGroup);
 
-    // 入方向：状态 / 数据 / 错误，全部由网络层驱动 UI（跨线程 Queued，槽仍在 UI 线程执行）
-    connect(m_client, &ClientService::stateChanged,  this, &MainWindow::onConnectionStateChanged);
-    connect(m_client, &ClientService::packetReceived, this, &MainWindow::onPacketReceived);
+    // 入方向：状态 / 聊天 / 用户列表 / 错误，全部由网络层驱动 UI（跨线程 Queued）
+    connect(m_client, &ClientService::stateChanged,   this, &MainWindow::onConnectionStateChanged);
+    connect(m_client, &ClientService::userListChanged, this, &MainWindow::onUserListChanged);
+    connect(m_client, &ClientService::privateMessageReceived, this, &MainWindow::onPrivateMessageReceived);
+    connect(m_client, &ClientService::groupMessageReceived,   this, &MainWindow::onGroupMessageReceived);
+    connect(m_client, &ClientService::loginSucceeded, this, &MainWindow::onLoginSucceeded);
+    connect(m_client, &ClientService::loginFailed,    this, &MainWindow::onLoginFailed);
+    connect(m_client, &ClientService::reconnectAttempt, this, &MainWindow::onReconnectAttempt);
     connect(m_client, &ClientService::errorOccurred, this, [this](const QString& msg) {
         appendLog(QStringLiteral("ERROR"), msg);
     });
@@ -149,85 +182,141 @@ void MainWindow::onDisconnectClicked()
 {
     appendLog("INFO", "请求断开");
     emit disconnectRequested();
-    // 不断在这里改 UI 状态：等 stateChanged(0) 回来再改（单一数据源）
+    // 不在这里改 UI 状态：等 stateChanged(Disconnected) 回来再改（单一数据源）
+}
+
+void MainWindow::onSendClicked()
+{
+    const QString text = m_msgEdit->text().trimmed();
+    if (text.isEmpty())
+        return;
+
+    if (m_state != ConnectionState::Connected) {
+        appendLog("WARN", "未连接，无法发送");    // C4：不静默丢弃，给提示
+        return;
+    }
+
+    const QString now = QDateTime::currentDateTime().toString("HH:mm:ss");
+    const QString me  = m_selfName.isEmpty() ? QStringLiteral("我") : m_selfName;
+
+    if (m_targetUser.isEmpty()) {
+        emit sendGroupRequested(text);            // 群聊
+        appendChat(me, text, now);                // B2：发送方也显示一次
+    } else {
+        emit sendPrivateRequested(m_targetUser, text);
+        appendChat(me, QStringLiteral("-> %1: %2").arg(m_targetUser, text), now);   // B1：发送方显示自己发的
+    }
+
+    m_msgEdit->clear();
+}
+
+void MainWindow::onUserDoubleClicked(QListWidgetItem* item)
+{
+    if (!item)
+        return;
+
+    const QString name = item->text();
+    if (name == m_targetUser) {
+        m_targetUser.clear();                     // 再双击一次 = 取消私聊，回到群聊
+        m_msgEdit->setPlaceholderText("输入消息，回车发送（双击右侧用户 = 私聊）");
+        appendLog("INFO", "已切回群聊");
+    } else {
+        m_targetUser = name;
+        m_msgEdit->setPlaceholderText(QString("私聊 -> %1（再双击一次取消）").arg(name));
+        appendLog("INFO", QString("私聊目标：%1").arg(name));
+    }
 }
 
 void MainWindow::updateConnectEnabled()
 {
-    const bool ok = !m_hostEdit->text().trimmed().isEmpty()
+    const bool ok = m_state == ConnectionState::Disconnected
+                    && !m_hostEdit->text().trimmed().isEmpty()
                     && !m_userEdit->text().trimmed().isEmpty();
     m_connectBtn->setEnabled(ok);
-    // 已连接时不该再点 Connect（真实状态以后由 onConnectionStateChanged 决定）
 }
 
-void MainWindow::setConnectedUiState(bool connected)
+void MainWindow::updateSendEnabled()
 {
-    m_connectBtn->setEnabled(!connected);
-    m_disconnectBtn->setEnabled(connected);
-    m_hostEdit->setEnabled(!connected);
-    m_portSpin->setEnabled(!connected);
-    m_userEdit->setEnabled(!connected);
-    m_statusLabel->setText(connected ? "已连接" : "未连接");
+    const bool ok = m_state == ConnectionState::Connected;
+    m_msgEdit->setEnabled(ok);
+    m_sendBtn->setEnabled(ok);
+}
+
+void MainWindow::refreshUiState()
+{
+    const bool offline = m_state == ConnectionState::Disconnected;
+    m_hostEdit->setEnabled(offline);
+    m_portSpin->setEnabled(offline);
+    m_userEdit->setEnabled(offline);
+    m_disconnectBtn->setEnabled(!offline);        // Connecting/Connected/Reconnecting 都能点断开
+    updateConnectEnabled();
+    updateSendEnabled();
 }
 
 // ---------------------------------------------------------------- 入方向槽
 
-void MainWindow::onConnectionStateChanged(int state)     // 由 ClientService 转发过来
+void MainWindow::onConnectionStateChanged(ConnectionState state)
 {
+    m_state = state;
+
     switch (state) {
-    case 0:
-        setConnectedUiState(false);
+    case ConnectionState::Disconnected:
+        m_statusLabel->setText("未连接");
         appendLog("INFO", "已断开");
         break;
-    case 1:
+    case ConnectionState::Connecting:
+        m_statusLabel->setText("连接中...");
         appendLog("INFO", "连接中...");
         break;
-    case 2:
-        setConnectedUiState(true);
+    case ConnectionState::Connected:
+        m_statusLabel->setText("已连接");
         appendLog("INFO", "已连接");
         break;
-    default:
-        appendLog("WARN", "未知状态");
+    case ConnectionState::Reconnecting:
+        m_statusLabel->setText("重连中...");
+        appendLog("WARN", "连接断开，重连中...（输入与发送已禁用，窗口保持打开）");
         break;
     }
-}
 
-// Day3：协议层切好的完整包先到这里；Day5 会换成 ChatManager 分发
-void MainWindow::onPacketReceived(const proto::Packet& packet)
-{
-    const proto::MessageType type = packet.header.type;
-
-    // 聊天类消息的 payload 是紧凑 JSON：{"from":...,"text":...,"time":...}
-    if (type == proto::MessageType::ChatPrivate || type == proto::MessageType::ChatGroup) {
-        QJsonObject obj;
-        if (ProtocolCodec::decodeJson(packet, &obj)) {
-            appendChat(obj.value(QStringLiteral("from")).toString(QStringLiteral("server")),
-                       obj.value(QStringLiteral("text")).toString(),
-                       obj.value(QStringLiteral("time")).toString(
-                           QTime::currentTime().toString(QStringLiteral("HH:mm:ss"))));
-            return;
-        }
-        appendLog(QStringLiteral("WARN"), QStringLiteral("聊天包 JSON 解析失败"));
-        return;
-    }
-
-    // 其余类型：Day3 先只打日志，证明「字节流 -> 消息」打通了
-    appendLog(QStringLiteral("INFO"),
-              QStringLiteral("收到 packet type=0x%1 requestId=%2 payloadLen=%3")
-                  .arg(int(type), 2, 16, QLatin1Char('0'))
-                  .arg(packet.header.requestId)
-                  .arg(packet.payload.size()));
-}
-
-void MainWindow::onChatMessageReceived(const QString& from, const QString& text, const QString& time)
-{
-    appendChat(from, text, time);
+    refreshUiState();                             // 界面状态只在这一处改
 }
 
 void MainWindow::onUserListChanged(const QStringList& users)
 {
     m_userList->clear();
     m_userList->addItems(users);
+
+    // 目标用户下线了就切回群聊，否则会一直发到一个不存在的名字
+    if (!m_targetUser.isEmpty() && !users.contains(m_targetUser)) {
+        m_targetUser.clear();
+        m_msgEdit->setPlaceholderText("输入消息，回车发送（双击右侧用户 = 私聊）");
+    }
+}
+
+void MainWindow::onPrivateMessageReceived(const QString& from, const QString& text, qint64 ts)
+{
+    appendChat(from, text, QDateTime::fromMSecsSinceEpoch(ts).toString("HH:mm:ss"));
+}
+
+void MainWindow::onGroupMessageReceived(const QString& from, const QString& text, qint64 ts)
+{
+    appendChat(from, text, QDateTime::fromMSecsSinceEpoch(ts).toString("HH:mm:ss"));
+}
+
+void MainWindow::onLoginSucceeded(const QString& selfName)
+{
+    m_selfName = selfName;
+    appendLog("INFO", QString("登录成功，当前用户：%1").arg(selfName));
+}
+
+void MainWindow::onLoginFailed(const QString& reason)
+{
+    appendLog("ERROR", QString("登录失败：%1").arg(reason));
+}
+
+void MainWindow::onReconnectAttempt(int attempt, int delayMs)
+{
+    appendLog("WARN", QString("第 %1 次重连，%2 ms 后重试").arg(attempt).arg(delayMs));
 }
 
 void MainWindow::onLogMessage(const QString& level, const QString& text)
